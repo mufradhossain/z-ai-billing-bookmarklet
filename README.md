@@ -19,7 +19,7 @@ Everything runs in your browser. No data is sent anywhere else.
 ## Install
 
 1. Show your **Bookmarks Bar** in Chrome: `Ctrl+Shift+B` (Mac: `Cmd+Shift+B`)
-2. Open the [bookmarklet page](https://yourusername.github.io/z-ai-billing-bookmarklet/)
+2. Open the [bookmarklet page](https://mufradhossain.github.io/z-ai-billing-bookmarklet/)
 3. **Drag the button** onto your bookmarks bar
 
 ## Use
