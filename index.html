@@ -72,6 +72,7 @@
       <li><b>Monthly breakdown</b> and <b>model cost</b> per model</li>
       <li><b>Token composition</b> split (cache, input, output)</li>
       <li><b>Insights</b> including monthly projection</li>
+      <li><b>Date range filter</b> to zoom into a specific period</li>
       <li><b>CSV download</b> button</li>
       <li>Runs entirely in your browser, no data leaves your machine</li>
     </ul>
@@ -90,8 +91,8 @@ const BOOKMARKLET_SRC = `(async()=>{
   if(!t){t=prompt('z.ai Billing\\n\\nAuth token not found. Paste Bearer token:');if(!t)return}
   if(t.startsWith('Bearer '))t=t.slice(7);
 
-  /* accent and background tokens */
-  const AC='#0ea5e9',AC2='#0284c7',BG='#09090b',BG2='#111114',BG3='#18181b',BRD='#27272a',TXT='#d4d4d8',TXT2='#71717a',TXT3='#52525b';
+  const AC='#0ea5e9',BG='#09090b',BG2='#111114',BRD='#27272a',TXT='#d4d4d8',TXT2='#71717a',TXT3='#52525b';
+  const INPUT_CSS='background:'+BG+';color:'+TXT+';border:1px solid '+BRD+';border-radius:6px;padding:6px 10px;font-size:12px;font-family:inherit;outline:none';
 
   const ov=document.createElement('div');
   ov.id='zai-dash';
@@ -101,215 +102,228 @@ const BOOKMARKLET_SRC = `(async()=>{
   const log=document.getElementById('zai-log');
   const bar=document.getElementById('zai-bar');
 
+  function showExpired(){
+    ov.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%"><div style="text-align:center;max-width:360px;padding:20px"><div style="font-size:13px;color:#f87171;text-transform:uppercase;letter-spacing:0.06em;font-weight:600;margin-bottom:10px">Session expired</div><p style="color:'+TXT2+';font-size:14px;margin-bottom:20px">Your z.ai auth token has expired or is invalid. Reload z.ai and try again.</p><button onclick="document.getElementById(\\'zai-dash\\').remove()" style="background:'+BG2+';color:'+TXT+';border:1px solid '+BRD+';padding:10px 24px;border-radius:8px;cursor:pointer;font-size:13px">Close</button></div></div>';
+  }
+
   try{
   const payload=JSON.parse(atob(t.split('.')[1].replace(/-/g,'+').replace(/_/g,'/')));
   const CID=payload.customer_id||payload.customerNumber||'';
   const created=payload.customer?.createTime||payload.createTime;
-  const start=created?new Date(created):new Date(2025,0);
+  const accountStart=created?new Date(created):new Date(2025,0);
   const fmtYM=dt=>dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0');
+  const fmtYMD=dt=>dt.getFullYear()+'-'+String(dt.getMonth()+1).padStart(2,'0')+'-'+String(dt.getDate()).padStart(2,'0');
   const months=[];
-  let d=new Date(start.getFullYear(),start.getMonth()),now=new Date();
+  let d=new Date(accountStart.getFullYear(),accountStart.getMonth()),now=new Date();
   while(fmtYM(d)<=fmtYM(now)){months.push(fmtYM(d));d.setMonth(d.getMonth()+1)}
-  log.textContent=start.toISOString().slice(0,10)+' to now, '+months.length+' months';
+  log.textContent=fmtYMD(accountStart)+' to now, '+months.length+' months';
 
-  let all=[];
+  let allRecords=[];
   for(let mi=0;mi<months.length;mi++){
     log.textContent='Fetching '+months[mi]+'...';
     bar.style.width=((mi+1)/months.length*100)+'%';
     let p=1;
     while(true){
       const r=await fetch('https://api.z.ai/api/platform-charge-zai/bill/day?customerId='+CID+'&billingPeriod='+months[mi]+'&pageNum='+p+'&pageSize=100',{headers:{'Authorization':'Bearer '+t}});
+      if(r.status===401){showExpired();return}
       const j=await r.json();
-      if(j.success&&j.data){all.push(...(j.data.records||[]));if(p>=j.data.pages)break;p++}
+      if(j.code===401||j.code===50000||(j.msg&&/token.*(expired|invalid|incorrect)/i.test(j.msg))){showExpired();return}
+      if(j.success&&j.data){allRecords.push(...(j.data.records||[]));if(p>=j.data.pages)break;p++}
       else throw new Error(j.msg||'API error');
     }
   }
 
-  /* aggregate */
-  const daily={};
-  let totalCost=0,totalCalls=0,totalIn=0,totalOut=0,totalCache=0;
-  const modelCost={};
-  for(const r of all){
-    const dt=r.billingDate;
-    if(!daily[dt])daily[dt]={date:dt,calls:0,in:0,out:0,cache:0,cost:0,models:new Set()};
-    const tk=parseInt(r.usageCount||0);
-    const c=parseFloat(r.costPrice||0)*tk/1000;
-    const mc=r.modelCode||'unknown';
-    daily[dt].calls+=(r.apiUsage||0);
-    daily[dt].cost+=c;
-    daily[dt].models.add(mc);
-    modelCost[mc]=(modelCost[mc]||0)+c;
-    if(r.tokenType==='INPUT')daily[dt].in+=tk;
-    else if(r.tokenType==='OUTPUT')daily[dt].out+=tk;
-    else if(r.tokenType==='CACHE')daily[dt].cache+=tk;
-  }
-  const sorted=Object.keys(daily).sort();
-  for(const dt of sorted){const v=daily[dt];totalCost+=v.cost;totalCalls+=v.calls;totalIn+=v.in;totalOut+=v.out;totalCache+=v.cache}
-  const totalTokens=totalIn+totalOut+totalCache;
-  const activeDays=sorted.length;
+  const accountStartStr=fmtYMD(accountStart);
+  const todayStr=fmtYMD(now);
 
-  let busiest={date:'',calls:0},costliest={date:'',cost:0};
-  for(const dt of sorted){const v=daily[dt];if(v.calls>busiest.calls)busiest={date:dt,calls:v.calls};if(v.cost>costliest.cost)costliest={date:dt,cost:v.cost}}
-  const avgCost=totalCost/activeDays;
-  const totalDaysSince=Math.ceil((now-start)/(864e5));
-  const allModels=Object.keys(modelCost).sort((a,b)=>modelCost[b]-modelCost[a]);
+  function render(fromDate,toDate){
+    const filtered=allRecords.filter(r=>{const d=r.billingDate;return d>=fromDate&&d<=toDate});
 
-  const monthly={};
-  for(const dt of sorted){const v=daily[dt];const m=dt.slice(0,7);if(!monthly[m])monthly[m]={cost:0,calls:0};monthly[m].cost+=v.cost;monthly[m].calls+=v.calls}
-  const monthKeys=Object.keys(monthly).sort();
-  const maxMonthCost=Math.max(...monthKeys.map(m=>monthly[m].cost));
+    const daily={};
+    let totalCost=0,totalCalls=0,totalIn=0,totalOut=0,totalCache=0;
+    const modelCost={};
+    for(const r of filtered){
+      const dt=r.billingDate;
+      if(!daily[dt])daily[dt]={date:dt,calls:0,in:0,out:0,cache:0,cost:0,models:new Set()};
+      const tk=parseInt(r.usageCount||0);
+      const c=parseFloat(r.costPrice||0)*tk/1000;
+      const mc=r.modelCode||'unknown';
+      daily[dt].calls+=(r.apiUsage||0);
+      daily[dt].cost+=c;
+      daily[dt].models.add(mc);
+      modelCost[mc]=(modelCost[mc]||0)+c;
+      if(r.tokenType==='INPUT')daily[dt].in+=tk;
+      else if(r.tokenType==='OUTPUT')daily[dt].out+=tk;
+      else if(r.tokenType==='CACHE')daily[dt].cache+=tk;
+    }
+    const sorted=Object.keys(daily).sort();
+    for(const dt of sorted){const v=daily[dt];totalCost+=v.cost;totalCalls+=v.calls;totalIn+=v.in;totalOut+=v.out;totalCache+=v.cache}
+    const totalTokens=totalIn+totalOut+totalCache;
+    const activeDays=sorted.length;
+    if(activeDays===0){ov.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%"><div style="text-align:center"><div style="font-size:14px;color:'+TXT2+'">No billing data in this range</div><button onclick="document.getElementById(\\'zai-dash\\').remove()" style="margin-top:16px;background:'+BG2+';color:'+TXT+';border:1px solid '+BRD+';padding:8px 20px;border-radius:8px;cursor:pointer;font-size:13px">Close</button></div></div>';return}
 
-  const cm=fmtYM(now);
-  const cmData=monthly[cm]||{cost:0};
-  const cmDay=now.getDate();
-  const cmDays=new Date(now.getFullYear(),now.getMonth()+1,0).getDate();
-  const cmProjected=cmDay>0?cmData.cost/cmDay*cmDays:0;
+    let busiest={date:'',calls:0},costliest={date:'',cost:0};
+    for(const dt of sorted){const v=daily[dt];if(v.calls>busiest.calls)busiest={date:dt,calls:v.calls};if(v.cost>costliest.cost)costliest={date:dt,cost:v.cost}}
+    const avgCost=totalCost/activeDays;
+    const rangeStart=new Date(fromDate),rangeEnd=new Date(toDate);
+    const totalDaysRange=Math.max(1,Math.ceil((rangeEnd-rangeStart)/(864e5))+1);
+    const allModels=Object.keys(modelCost).sort((a,b)=>modelCost[b]-modelCost[a]);
 
-  /* csv */
-  let csv='Date,API Calls,Input Tokens,Output Tokens,Cache Tokens,Est Cost (USD),Models\\n';
-  for(const dt of sorted){const v=daily[dt];csv+=dt+','+v.calls+','+v.in+','+v.out+','+v.cache+','+v.cost.toFixed(4)+','+[...v.models].join('+')+'\\n'}
+    const monthly={};
+    for(const dt of sorted){const v=daily[dt];const m=dt.slice(0,7);if(!monthly[m])monthly[m]={cost:0,calls:0};monthly[m].cost+=v.cost;monthly[m].calls+=v.calls}
+    const monthKeys=Object.keys(monthly).sort();
+    const maxMonthCost=Math.max(...monthKeys.map(m=>monthly[m].cost));
 
-  const fmt=n=>{if(n>=1e9)return(n/1e9).toFixed(2)+'B';if(n>=1e6)return(n/1e6).toFixed(2)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'K';return String(Math.round(n))};
-  const maxDayCost=Math.max(...sorted.map(d=>daily[d].cost||0.01));
-  const recent=sorted.slice(-60);
-  const monthLbl=m=>{const d=new Date(m+'-02');return d.toLocaleString('en',{month:'short'})};
+    const cm=fmtYM(now);
+    const cmData=monthly[cm]||{cost:0};
+    const cmDay=now.getDate();
+    const cmDays=new Date(now.getFullYear(),now.getMonth()+1,0).getDate();
+    const cmProjected=cmDay>0?cmData.cost/cmDay*cmDays:0;
 
-  /* render */
-  let h='';
-  h+='<div style="max-width:860px;margin:0 auto;padding:28px 20px">';
+    let csv='Date,API Calls,Input Tokens,Output Tokens,Cache Tokens,Est Cost (USD),Models\\n';
+    for(const dt of sorted){const v=daily[dt];csv+=dt+','+v.calls+','+v.in+','+v.out+','+v.cache+','+v.cost.toFixed(4)+','+[...v.models].join('+')+'\\n'}
 
-  /* header */
-  h+='<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:28px">';
-  h+='<div>';
-  h+='<div style="font-size:11px;color:'+AC+';text-transform:uppercase;letter-spacing:0.08em;font-weight:600;margin-bottom:6px">z.ai Billing</div>';
-  h+='<h1 style="font-size:22px;color:#fafafa;margin:0;font-weight:600;letter-spacing:-0.02em">$'+totalCost.toFixed(2)+' total</h1>';
-  h+='<p style="color:'+TXT3+';font-size:12px;margin-top:4px">Since '+start.toISOString().slice(0,10)+' / '+activeDays+' active days / '+all.length+' records</p>';
-  h+='</div>';
-  h+='<div style="display:flex;gap:6px;flex-shrink:0">';
-  h+='<button id="zai-csv" style="background:'+AC+';color:'+BG+';border:none;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600;transition:opacity 0.15s">Download CSV</button>';
-  h+='<button id="zai-close" style="background:'+BG2+';color:'+TXT2+';border:1px solid '+BRD+';padding:8px 12px;border-radius:8px;cursor:pointer;font-size:16px;transition:opacity 0.15s">Close</button>';
-  h+='</div></div>';
+    const fmt=n=>{if(n>=1e9)return(n/1e9).toFixed(2)+'B';if(n>=1e6)return(n/1e6).toFixed(2)+'M';if(n>=1e3)return(n/1e3).toFixed(1)+'K';return String(Math.round(n))};
+    const maxDayCost=Math.max(...sorted.map(d=>daily[d].cost||0.01));
+    const recent=sorted.slice(-60);
+    const monthLbl=m=>{const d=new Date(m+'-02');return d.toLocaleString('en',{month:'short'})};
 
-  /* stat cards: hero cost card + 3 smaller */
-  h+='<div style="display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:8px;margin-bottom:20px">';
-  /* hero card */
-  h+='<div style="background:'+BG2+';border:1px solid '+BRD+';border-radius:8px;padding:20px 22px;display:flex;flex-direction:column;justify-content:center">';
-  h+='<div style="font-size:11px;color:'+TXT2+';text-transform:uppercase;letter-spacing:0.06em;font-weight:500">Total cost</div>';
-  h+='<div style="font-size:32px;color:#fafafa;font-weight:700;letter-spacing:-0.03em;margin-top:2px">$'+totalCost.toFixed(2)+'</div>';
-  h+='<div style="font-size:11px;color:'+TXT3+';margin-top:4px">$'+cmProjected.toFixed(2)+' projected this month</div>';
-  h+='</div>';
-  /* call card */
-  h+='<div style="background:'+BG2+';border:1px solid '+BRD+';border-radius:8px;padding:16px 18px">';
-  h+='<div style="font-size:10px;color:'+TXT2+';text-transform:uppercase;letter-spacing:0.06em;font-weight:500">Calls</div>';
-  h+='<div style="font-size:22px;color:#fafafa;font-weight:600;margin-top:2px">'+fmt(totalCalls)+'</div>';
-  h+='</div>';
-  /* tokens card */
-  h+='<div style="background:'+BG2+';border:1px solid '+BRD+';border-radius:8px;padding:16px 18px">';
-  h+='<div style="font-size:10px;color:'+TXT2+';text-transform:uppercase;letter-spacing:0.06em;font-weight:500">Tokens</div>';
-  h+='<div style="font-size:22px;color:#fafafa;font-weight:600;margin-top:2px">'+fmt(totalTokens)+'</div>';
-  h+='</div>';
-  /* days card */
-  h+='<div style="background:'+BG2+';border:1px solid '+BRD+';border-radius:8px;padding:16px 18px">';
-  h+='<div style="font-size:10px;color:'+TXT2+';text-transform:uppercase;letter-spacing:0.06em;font-weight:500">Active</div>';
-  h+='<div style="font-size:22px;color:#fafafa;font-weight:600;margin-top:2px">'+activeDays+'<span style="font-size:13px;color:'+TXT3+';font-weight:400">/'+totalDaysSince+'</span></div>';
-  h+='</div>';
-  h+='</div>';
+    let h='';
+    h+='<div style="max-width:860px;margin:0 auto;padding:28px 20px">';
 
-  /* daily chart */
-  h+='<div style="background:'+BG2+';border:1px solid '+BRD+';border-radius:8px;padding:18px;margin-bottom:14px">';
-  h+='<div style="font-size:11px;color:'+TXT2+';text-transform:uppercase;letter-spacing:0.06em;font-weight:600;margin-bottom:14px">Daily cost / last '+recent.length+' days</div>';
-  h+='<div style="max-height:240px;overflow-y:auto">';
-  for(const dt of recent){
-    const v=daily[dt];
-    const pct=Math.max(v.cost/maxDayCost*100,0.8);
-    const c=v.cost/maxDayCost>0.7?'#f87171':v.cost/maxDayCost>0.4?'#fbbf24':AC;
-    h+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">';
-    h+='<span style="color:'+TXT3+';font-size:11px;font-family:monospace;width:56px;flex-shrink:0">'+dt.slice(5)+'</span>';
-    h+='<div style="flex:1;background:'+BG+';border-radius:4px;height:16px;overflow:hidden"><div style="height:100%;width:'+pct+'%;background:'+c+';border-radius:4px;min-width:1px;opacity:0.85"></div></div>';
-    h+='<span style="color:'+TXT2+';font-size:11px;width:52px;text-align:right;font-family:monospace">$'+v.cost.toFixed(2)+'</span>';
+    /* header */
+    h+='<div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px">';
+    h+='<div>';
+    h+='<div style="font-size:11px;color:'+AC+';text-transform:uppercase;letter-spacing:0.08em;font-weight:600;margin-bottom:6px">z.ai Billing</div>';
+    h+='<h1 style="font-size:22px;color:#fafafa;margin:0;font-weight:600;letter-spacing:-0.02em">$'+totalCost.toFixed(2)+'</h1>';
+    h+='<p style="color:'+TXT3+';font-size:12px;margin-top:3px">'+activeDays+' active days / '+filtered.length+' records</p>';
     h+='</div>';
-  }
-  h+='</div></div>';
+    h+='<div style="display:flex;gap:6px;flex-shrink:0">';
+    h+='<button id="zai-csv" style="background:'+AC+';color:'+BG+';border:none;padding:8px 16px;border-radius:8px;cursor:pointer;font-size:13px;font-weight:600">Download CSV</button>';
+    h+='<button id="zai-close" style="background:'+BG2+';color:'+TXT2+';border:1px solid '+BRD+';padding:8px 12px;border-radius:8px;cursor:pointer;font-size:16px">Close</button>';
+    h+='</div></div>';
 
-  /* two col: monthly + models */
-  h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">';
-
-  /* monthly */
-  h+='<div style="background:'+BG2+';border:1px solid '+BRD+';border-radius:8px;padding:18px">';
-  h+='<div style="font-size:11px;color:'+TXT2+';text-transform:uppercase;letter-spacing:0.06em;font-weight:600;margin-bottom:14px">Monthly</div>';
-  for(const m of monthKeys){
-    const v=monthly[m];
-    const pct=maxMonthCost>0?v.cost/maxMonthCost*100:0;
-    h+='<div style="display:flex;align-items:center;gap:6px;margin-bottom:5px">';
-    h+='<span style="color:'+TXT3+';font-size:12px;width:28px">'+monthLbl(m)+'</span>';
-    h+='<div style="flex:1;background:'+BG+';border-radius:4px;height:18px;overflow:hidden"><div style="height:100%;width:'+pct+'%;background:'+AC+';border-radius:4px;display:flex;align-items:center;padding-left:6px;min-width:1px;opacity:0.85"><span style="font-size:10px;color:'+BG+';font-weight:600;white-space:nowrap">'+(pct>12?'$'+v.cost.toFixed(0):'')+'</span></div></div>';
-    if(pct<=12)h+='<span style="color:'+TXT3+';font-size:10px;font-family:monospace">$'+v.cost.toFixed(0)+'</span>';
-    else h+='<span style="width:30px"></span>';
+    /* date range filter */
+    h+='<div style="display:flex;align-items:center;gap:10px;margin-bottom:20px;background:'+BG2+';border:1px solid '+BRD+';border-radius:8px;padding:12px 16px">';
+    h+='<span style="font-size:11px;color:'+TXT2+';text-transform:uppercase;letter-spacing:0.06em;font-weight:600">Range</span>';
+    h+='<input type="date" id="zai-from" value="'+fromDate+'" min="'+accountStartStr+'" max="'+todayStr+'" style="'+INPUT_CSS+'">';
+    h+='<span style="color:'+TXT3+';font-size:12px">to</span>';
+    h+='<input type="date" id="zai-to" value="'+toDate+'" min="'+accountStartStr+'" max="'+todayStr+'" style="'+INPUT_CSS+'">';
+    h+='<button id="zai-reset" style="background:transparent;color:'+TXT3+';border:1px solid '+BRD+';padding:5px 12px;border-radius:6px;cursor:pointer;font-size:11px;margin-left:auto">Reset</button>';
     h+='</div>';
+
+    /* stat cards */
+    h+='<div style="display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:8px;margin-bottom:20px">';
+    h+='<div style="background:'+BG2+';border:1px solid '+BRD+';border-radius:8px;padding:20px 22px;display:flex;flex-direction:column;justify-content:center">';
+    h+='<div style="font-size:11px;color:'+TXT2+';text-transform:uppercase;letter-spacing:0.06em;font-weight:500">Total cost</div>';
+    h+='<div style="font-size:32px;color:#fafafa;font-weight:700;letter-spacing:-0.03em;margin-top:2px">$'+totalCost.toFixed(2)+'</div>';
+    h+='<div style="font-size:11px;color:'+TXT3+';margin-top:4px">$'+cmProjected.toFixed(2)+' projected this month</div>';
+    h+='</div>';
+    h+='<div style="background:'+BG2+';border:1px solid '+BRD+';border-radius:8px;padding:16px 18px">';
+    h+='<div style="font-size:10px;color:'+TXT2+';text-transform:uppercase;letter-spacing:0.06em;font-weight:500">Calls</div>';
+    h+='<div style="font-size:22px;color:#fafafa;font-weight:600;margin-top:2px">'+fmt(totalCalls)+'</div>';
+    h+='</div>';
+    h+='<div style="background:'+BG2+';border:1px solid '+BRD+';border-radius:8px;padding:16px 18px">';
+    h+='<div style="font-size:10px;color:'+TXT2+';text-transform:uppercase;letter-spacing:0.06em;font-weight:500">Tokens</div>';
+    h+='<div style="font-size:22px;color:#fafafa;font-weight:600;margin-top:2px">'+fmt(totalTokens)+'</div>';
+    h+='</div>';
+    h+='<div style="background:'+BG2+';border:1px solid '+BRD+';border-radius:8px;padding:16px 18px">';
+    h+='<div style="font-size:10px;color:'+TXT2+';text-transform:uppercase;letter-spacing:0.06em;font-weight:500">Active</div>';
+    h+='<div style="font-size:22px;color:#fafafa;font-weight:600;margin-top:2px">'+activeDays+'<span style="font-size:13px;color:'+TXT3+';font-weight:400">/'+totalDaysRange+'</span></div>';
+    h+='</div>';
+    h+='</div>';
+
+    /* daily chart */
+    h+='<div style="background:'+BG2+';border:1px solid '+BRD+';border-radius:8px;padding:18px;margin-bottom:14px">';
+    h+='<div style="font-size:11px;color:'+TXT2+';text-transform:uppercase;letter-spacing:0.06em;font-weight:600;margin-bottom:14px">Daily cost / last '+recent.length+' days</div>';
+    h+='<div style="max-height:240px;overflow-y:auto">';
+    for(const dt of recent){
+      const v=daily[dt];
+      const pct=Math.max(v.cost/maxDayCost*100,0.8);
+      const c=v.cost/maxDayCost>0.7?'#f87171':v.cost/maxDayCost>0.4?'#fbbf24':AC;
+      h+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:3px">';
+      h+='<span style="color:'+TXT3+';font-size:11px;font-family:monospace;width:56px;flex-shrink:0">'+dt.slice(5)+'</span>';
+      h+='<div style="flex:1;background:'+BG+';border-radius:4px;height:16px;overflow:hidden"><div style="height:100%;width:'+pct+'%;background:'+c+';border-radius:4px;min-width:1px;opacity:0.85"></div></div>';
+      h+='<span style="color:'+TXT2+';font-size:11px;width:52px;text-align:right;font-family:monospace">$'+v.cost.toFixed(2)+'</span>';
+      h+='</div>';
+    }
+    h+='</div></div>';
+
+    /* two col: monthly + models */
+    h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">';
+    h+='<div style="background:'+BG2+';border:1px solid '+BRD+';border-radius:8px;padding:18px">';
+    h+='<div style="font-size:11px;color:'+TXT2+';text-transform:uppercase;letter-spacing:0.06em;font-weight:600;margin-bottom:14px">Monthly</div>';
+    for(const m of monthKeys){
+      const v=monthly[m];
+      const pct=maxMonthCost>0?v.cost/maxMonthCost*100:0;
+      h+='<div style="display:flex;align-items:center;gap:6px;margin-bottom:5px">';
+      h+='<span style="color:'+TXT3+';font-size:12px;width:28px">'+monthLbl(m)+'</span>';
+      h+='<div style="flex:1;background:'+BG+';border-radius:4px;height:18px;overflow:hidden"><div style="height:100%;width:'+pct+'%;background:'+AC+';border-radius:4px;display:flex;align-items:center;padding-left:6px;min-width:1px;opacity:0.85"><span style="font-size:10px;color:'+BG+';font-weight:600;white-space:nowrap">'+(pct>12?'$'+v.cost.toFixed(0):'')+'</span></div></div>';
+      if(pct<=12)h+='<span style="color:'+TXT3+';font-size:10px;font-family:monospace">$'+v.cost.toFixed(0)+'</span>';
+      else h+='<span style="width:30px"></span>';
+      h+='</div>';
+    }
+    h+='</div>';
+    h+='<div style="background:'+BG2+';border:1px solid '+BRD+';border-radius:8px;padding:18px">';
+    h+='<div style="font-size:11px;color:'+TXT2+';text-transform:uppercase;letter-spacing:0.06em;font-weight:600;margin-bottom:14px">By model</div>';
+    const mcols=['#0ea5e9','#8b5cf6','#f472b6','#34d399','#fbbf24','#f87171','#38bdf8','#fb923c'];
+    for(let i=0;i<allModels.length;i++){
+      const m=allModels[i];
+      const pct=totalCost>0?modelCost[m]/totalCost*100:0;
+      h+='<div style="margin-bottom:10px">';
+      h+='<div style="display:flex;justify-content:space-between;margin-bottom:3px">';
+      h+='<span style="color:'+TXT+';font-size:12px">'+m+'</span>';
+      h+='<span style="color:'+TXT3+';font-size:11px;font-family:monospace">$'+modelCost[m].toFixed(2)+' ('+pct.toFixed(1)+'%)</span></div>';
+      h+='<div style="background:'+BG+';border-radius:4px;height:6px;overflow:hidden"><div style="height:100%;width:'+pct+'%;background:'+mcols[i%mcols.length]+';border-radius:4px;opacity:0.8"></div></div></div>';
+    }
+    h+='</div></div>';
+
+    /* two col: tokens + insights */
+    h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">';
+    h+='<div style="background:'+BG2+';border:1px solid '+BRD+';border-radius:8px;padding:18px">';
+    h+='<div style="font-size:11px;color:'+TXT2+';text-transform:uppercase;letter-spacing:0.06em;font-weight:600;margin-bottom:14px">Tokens</div>';
+    for(const[label,val,tc]of[['Cache',totalCache,'#0ea5e9'],['Input',totalIn,'#8b5cf6'],['Output',totalOut,'#f472b6']]){
+      const pct=totalTokens>0?val/totalTokens*100:0;
+      h+='<div style="margin-bottom:14px">';
+      h+='<div style="display:flex;justify-content:space-between;margin-bottom:3px">';
+      h+='<span style="color:'+TXT+';font-size:12px">'+label+'</span>';
+      h+='<span style="color:'+TXT3+';font-size:11px;font-family:monospace">'+fmt(val)+' ('+pct.toFixed(1)+'%)</span></div>';
+      h+='<div style="background:'+BG+';border-radius:4px;height:8px;overflow:hidden"><div style="height:100%;width:'+pct+'%;background:'+tc+';border-radius:4px;opacity:0.8"></div></div></div>';
+    }
+    h+='</div>';
+    h+='<div style="background:'+BG2+';border:1px solid '+BRD+';border-radius:8px;padding:18px">';
+    h+='<div style="font-size:11px;color:'+TXT2+';text-transform:uppercase;letter-spacing:0.06em;font-weight:600;margin-bottom:14px">Insights</div>';
+    h+='<div style="font-size:13px;line-height:2">';
+    h+='<div><span style="color:#fbbf24;font-weight:600">Busiest</span> <span style="color:'+TXT+'">'+busiest.date+' / '+busiest.calls.toLocaleString()+' calls</span></div>';
+    h+='<div><span style="color:#f87171;font-weight:600">Costliest</span> <span style="color:'+TXT+'">'+costliest.date+' / $'+costliest.cost.toFixed(2)+'</span></div>';
+    h+='<div><span style="color:'+AC+';font-weight:600">Avg/day</span> <span style="color:'+TXT+'">$'+avgCost.toFixed(2)+' per active day</span></div>';
+    h+='<div><span style="color:#8b5cf6;font-weight:600">Models</span> <span style="color:'+TXT+'">'+allModels.length+' used</span></div>';
+    h+='<div><span style="color:#34d399;font-weight:600">Activity</span> <span style="color:'+TXT+'">'+((activeDays/totalDaysRange)*100).toFixed(0)+'% ('+activeDays+'/'+totalDaysRange+' days)</span></div>';
+    h+='<div><span style="color:#38bdf8;font-weight:600">This month</span> <span style="color:'+TXT+'">$'+cmData.cost.toFixed(2)+' so far, ~$'+cmProjected.toFixed(2)+' projected</span></div>';
+    h+='</div></div>';
+    h+='</div></div>';
+
+    ov.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;z-index:999999;background:'+BG+';color:'+TXT+';font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;overflow-y:auto';
+    ov.innerHTML=h;
+
+    document.getElementById('zai-close').onclick=()=>ov.remove();
+    document.getElementById('zai-csv').onclick=()=>{
+      const blob=new Blob([csv],{type:'text/csv'});
+      const a=document.createElement('a');
+      a.href=URL.createObjectURL(blob);
+      a.download='z_ai_billing_'+fromDate+'_to_'+toDate+'.csv';
+      a.click();
+    };
+    document.getElementById('zai-from').onchange=e=>{render(e.target.value,document.getElementById('zai-to').value)};
+    document.getElementById('zai-to').onchange=e=>{render(document.getElementById('zai-from').value,e.target.value)};
+    document.getElementById('zai-reset').onclick=()=>render(accountStartStr,todayStr);
   }
-  h+='</div>';
 
-  /* models */
-  h+='<div style="background:'+BG2+';border:1px solid '+BRD+';border-radius:8px;padding:18px">';
-  h+='<div style="font-size:11px;color:'+TXT2+';text-transform:uppercase;letter-spacing:0.06em;font-weight:600;margin-bottom:14px">By model</div>';
-  const mc=['#0ea5e9','#8b5cf6','#f472b6','#34d399','#fbbf24','#f87171','#38bdf8','#fb923c'];
-  for(let i=0;i<allModels.length;i++){
-    const m=allModels[i];
-    const pct=totalCost>0?modelCost[m]/totalCost*100:0;
-    h+='<div style="margin-bottom:10px">';
-    h+='<div style="display:flex;justify-content:space-between;margin-bottom:3px">';
-    h+='<span style="color:'+TXT+';font-size:12px">'+m+'</span>';
-    h+='<span style="color:'+TXT3+';font-size:11px;font-family:monospace">$'+modelCost[m].toFixed(2)+' ('+pct.toFixed(1)+'%)</span></div>';
-    h+='<div style="background:'+BG+';border-radius:4px;height:6px;overflow:hidden"><div style="height:100%;width:'+pct+'%;background:'+mc[i%mc.length]+';border-radius:4px;opacity:0.8"></div></div></div>';
-  }
-  h+='</div></div>';
-
-  /* two col: tokens + insights */
-  h+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">';
-
-  /* tokens */
-  h+='<div style="background:'+BG2+';border:1px solid '+BRD+';border-radius:8px;padding:18px">';
-  h+='<div style="font-size:11px;color:'+TXT2+';text-transform:uppercase;letter-spacing:0.06em;font-weight:600;margin-bottom:14px">Tokens</div>';
-  const tokRows=[['Cache',totalCache,'#0ea5e9'],['Input',totalIn,'#8b5cf6'],['Output',totalOut,'#f472b6']];
-  for(const[label,val,tc]of tokRows){
-    const pct=totalTokens>0?val/totalTokens*100:0;
-    h+='<div style="margin-bottom:14px">';
-    h+='<div style="display:flex;justify-content:space-between;margin-bottom:3px">';
-    h+='<span style="color:'+TXT+';font-size:12px">'+label+'</span>';
-    h+='<span style="color:'+TXT3+';font-size:11px;font-family:monospace">'+fmt(val)+' ('+pct.toFixed(1)+'%)</span></div>';
-    h+='<div style="background:'+BG+';border-radius:4px;height:8px;overflow:hidden"><div style="height:100%;width:'+pct+'%;background:'+tc+';border-radius:4px;opacity:0.8"></div></div></div>';
-  }
-  h+='</div>';
-
-  /* insights */
-  h+='<div style="background:'+BG2+';border:1px solid '+BRD+';border-radius:8px;padding:18px">';
-  h+='<div style="font-size:11px;color:'+TXT2+';text-transform:uppercase;letter-spacing:0.06em;font-weight:600;margin-bottom:14px">Insights</div>';
-  h+='<div style="font-size:13px;line-height:2">';
-  h+='<div><span style="color:#fbbf24;font-weight:600">Busiest</span> <span style="color:'+TXT+'">'+busiest.date+' / '+busiest.calls.toLocaleString()+' calls</span></div>';
-  h+='<div><span style="color:#f87171;font-weight:600">Costliest</span> <span style="color:'+TXT+'">'+costliest.date+' / $'+costliest.cost.toFixed(2)+'</span></div>';
-  h+='<div><span style="color:'+AC+';font-weight:600">Avg/day</span> <span style="color:'+TXT+'">$'+avgCost.toFixed(2)+' per active day</span></div>';
-  h+='<div><span style="color:#8b5cf6;font-weight:600">Models</span> <span style="color:'+TXT+'">'+allModels.length+' used</span></div>';
-  h+='<div><span style="color:#34d399;font-weight:600">Activity</span> <span style="color:'+TXT+'">'+((activeDays/totalDaysSince)*100).toFixed(0)+'% ('+activeDays+'/'+totalDaysSince+' days)</span></div>';
-  h+='<div><span style="color:#38bdf8;font-weight:600">This month</span> <span style="color:'+TXT+'">$'+cmData.cost.toFixed(2)+' so far, ~$'+cmProjected.toFixed(2)+' projected</span></div>';
-  h+='</div></div>';
-
-  h+='</div></div>';
-
-  ov.innerHTML='';
-  ov.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;z-index:999999;background:'+BG+';color:'+TXT+';font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;overflow-y:auto';
-  ov.innerHTML=h;
-
-  document.getElementById('zai-close').onclick=()=>ov.remove();
-  document.getElementById('zai-csv').onclick=()=>{
-    const blob=new Blob([csv],{type:'text/csv'});
-    const a=document.createElement('a');
-    a.href=URL.createObjectURL(blob);
-    a.download='z_ai_billing_'+new Date().toISOString().slice(0,10)+'.csv';
-    a.click();
-  };
+  render(accountStartStr,todayStr);
 
   }catch(e){
-    ov.innerHTML='<div style="text-align:center;padding:60px"><div style="font-size:13px;color:#f87171;text-transform:uppercase;letter-spacing:0.06em;font-weight:600;margin-bottom:8px">Error</div><p style="color:#71717a;font-size:14px">'+e.message+'</p><button onclick="document.getElementById(\\'zai-dash\\').remove()" style="margin-top:20px;background:#18181b;color:#d4d4d8;border:1px solid #27272a;padding:8px 20px;border-radius:8px;cursor:pointer;font-size:13px">Close</button></div>';
+    if(e.message&&/token.*(expired|invalid|incorrect)/i.test(e.message)){showExpired();return}
+    ov.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%"><div style="text-align:center;max-width:360px;padding:20px"><div style="font-size:13px;color:#f87171;text-transform:uppercase;letter-spacing:0.06em;font-weight:600;margin-bottom:8px">Error</div><p style="color:'+TXT2+';font-size:14px;margin-bottom:20px">'+e.message+'</p><button onclick="document.getElementById(\\'zai-dash\\').remove()" style="background:'+BG2+';color:'+TXT+';border:1px solid '+BRD+';padding:10px 24px;border-radius:8px;cursor:pointer;font-size:13px">Close</button></div></div>';
   }
 })()`;
 
